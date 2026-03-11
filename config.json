@@ -1,0 +1,49 @@
+{
+  "shifts": [
+    {
+      "name": "Shift 06-14",
+      "start": "06:00",
+      "end": "14:00",
+      "reg": "8"
+    },
+    {
+      "name": "Shift 14-22",
+      "start": "14:00",
+      "end": "22:00",
+      "reg": "8"
+    },
+    {
+      "name": "Shift 08-17",
+      "start": "08:00",
+      "end": "17:00",
+      "reg": "8"
+    },
+    {
+      "name": "Shift 20-06",
+      "start": "20:00",
+      "end": "06:00",
+      "reg": "8"
+    },
+    {
+      "name": "Shift 18-02",
+      "start": "18:00",
+      "end": "02:00",
+      "reg": "8"
+    },
+    {
+      "name": "Shift 19-04",
+      "start": "19:00",
+      "end": "04:00",
+      "reg": "8"
+    },
+    {
+      "name": "",
+      "start": "22:00",
+      "end": "6:00",
+      "reg": "8"
+    }
+  ],
+  "sun_reg_hrs": "6",
+  "late_deduct": true,
+  "hourly_rate": "200"
+}

@@ -4,7 +4,7 @@ pip install openpyxl pandas pdfplumber xlsxwriter xlrd
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading, os, re, traceback
+import threading, os, re, traceback, sys
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 
@@ -19,8 +19,27 @@ except: raise SystemExit("Missing: pip install xlsxwriter")
 
 import json, pathlib
 
-# Config file lives next to the script so it persists across runs
-CONFIG_FILE = pathlib.Path(__file__).parent / "config.json"
+def _fmt_hm(hours):
+    """Convert decimal hours to e.g. 1hr 30mins"""
+    if hours <= 0:
+        return "—"
+    total_min = round(hours * 60)
+    h = total_min // 60
+    m = total_min % 60
+    if h > 0 and m > 0:
+        return f"{h}hr {m}mins"
+    elif h > 0:
+        return f"{h}hr"
+    else:
+        return f"{m}mins"
+
+# Config file lives next to the script/executable so it persists across runs,
+# whether running as a .py file or a frozen EXE (PyInstaller, etc.)
+if getattr(sys, "frozen", False):
+    _base_dir = pathlib.Path(sys.executable).parent
+else:
+    _base_dir = pathlib.Path(__file__).parent
+CONFIG_FILE = _base_dir / "config.json"
 
 DEFAULT_CONFIG = {
     "shifts": [
@@ -57,12 +76,19 @@ def save_config(data):
     except Exception as ex:
         return False
 
-C={
+DARK={
     "bg":"#0f1523","surface":"#162032","card":"#1c2a3e","border":"#243448",
     "accent":"#00d4aa","adk":"#009e7f","orange":"#ff6b35","purple":"#7c3aed",
     "yellow":"#f59e0b","text":"#e2e8f0","muted":"#64748b","green":"#10b981",
     "red":"#ef4444","white":"#ffffff","blue":"#3b82f6",
 }
+LIGHT={
+    "bg":"#f0f4f8","surface":"#ffffff","card":"#e8edf2","border":"#cbd5e1",
+    "accent":"#00917a","adk":"#007a66","orange":"#e85d04","purple":"#6d28d9",
+    "yellow":"#b45309","text":"#1e293b","muted":"#64748b","green":"#059669",
+    "red":"#dc2626","white":"#1e293b","blue":"#2563eb",
+}
+C=dict(DARK)
 FT=("Segoe UI",20,"bold"); FH=("Segoe UI",11,"bold"); FB=("Segoe UI",10)
 FS=("Segoe UI",9); FM=("Consolas",9); FL=("Segoe UI",9,"bold")
 
@@ -214,36 +240,45 @@ def parse_excel(fp):
     try:
         xl = pd.ExcelFile(fp, engine=engine)
     except Exception as e:
-        # If it's an .xls file and the error looks like an xlrd BOF error,
+        # If it's an .xls file and the error is due to missing xlrd or a BOF record,
         # attempt to parse as HTML (common with web reports saved as .xls)
-        if engine == 'xlrd' and ext == '.xls' and 'BOF record' in str(e):
-            try:
-                html_dfs = pd.read_html(fp)
-                # Try each table until we get some records
-                for df in html_dfs:
-                    # Clean up: drop rows/cols that are all NaN
-                    df = df.dropna(how='all').dropna(axis=1, how='all')
-                    if df.empty:
-                        continue
-                    # First, try to find a header row with keywords
-                    for i in range(min(10, len(df))):
-                        row = df.iloc[i].astype(str).str.lower().str.strip()
-                        has_id = any(k in x for k in ('employee', 'staff', 'id', 'no', 'code', 'emp') for x in row)
-                        has_name = any(k in x for k in ('name', 'employee name', 'full name') for x in row)
-                        has_date = any(k in x for k in ('date', 'time', 'datetime', 'punch', 'check', 'clock') for x in row)
-                        if has_id and (has_name or has_date):
-                            records = _rows_to_records(df, i)
-                            if records:
-                                return records
-                    # If no keyword header found, guess columns by content
-                    records = _guess_columns_and_parse(df)
-                    if records:
-                        return records
-                # If none worked, raise error
-                raise ValueError("No valid records found in any HTML table.")
-            except Exception as html_err:
-                # If HTML parsing also fails, continue to the original error
-                raise e from html_err
+        if engine == 'xlrd' and ext == '.xls':
+            err_str = str(e)
+            # Missing xlrd or typical .xls corruption/BOF error
+            if 'xlrd' in err_str or 'BOF record' in err_str:
+                try:
+                    html_dfs = pd.read_html(fp)
+                    # Try each table until we get some records
+                    for df in html_dfs:
+                        # Clean up: drop rows/cols that are all NaN
+                        df = df.dropna(how='all').dropna(axis=1, how='all')
+                        if df.empty:
+                            continue
+                        # First, try to find a header row with keywords
+                        for i in range(min(10, len(df))):
+                            row = df.iloc[i].astype(str).str.lower().str.strip()
+                            has_id = any(k in x for k in ('employee', 'staff', 'id', 'no', 'code', 'emp') for x in row)
+                            has_name = any(k in x for k in ('name', 'employee name', 'full name') for x in row)
+                            has_date = any(k in x for k in ('date', 'time', 'datetime', 'punch', 'check', 'clock') for x in row)
+                            if has_id and (has_name or has_date):
+                                records = _rows_to_records(df, i)
+                                if records:
+                                    return records
+                        # If no keyword header found, guess columns by content
+                        records = _guess_columns_and_parse(df)
+                        if records:
+                            return records
+                    # If none worked, raise error
+                    raise ValueError("No valid records found in any HTML table.")
+                except Exception as html_err:
+                    # If HTML parsing also fails, raise a helpful error about missing xlrd
+                    if 'xlrd' in err_str:
+                        raise ImportError(
+                            "The file appears to be a real .xls spreadsheet, but 'xlrd' is not installed.\n"
+                            "Please install it with: pip install xlrd>=2.0.1"
+                        ) from html_err
+                    else:
+                        raise e from html_err
         # If we couldn't handle it, re-raise the original exception
         raise
 
@@ -305,16 +340,28 @@ def parse_pdf(fp):
 # ══════════════════════════════════════════════════════════
 
 def _match_shift(cin, shifts):
-    """Return the shift whose start time is closest to the check-in time."""
+    """Return the best matching shift for this check-in time.
+    
+    Automatically handles employees working multiple shifts in a week:
+    - Finds shift whose start time is closest to check-in
+    - Only matches if check-in is within 3 hours of shift start
+    - Falls back to closest match if none within 3hrs (avoids None)
+    """
     if not shifts:
         return None
     best=None; best_diff=1e9
+    within_window=None; window_diff=1e9
     for sh in shifts:
         sh_start=cin.replace(hour=sh["start_h"],minute=sh["start_m"],second=0,microsecond=0)
         diff=abs((cin-sh_start).total_seconds())
+        # Track best overall match
         if diff < best_diff:
             best_diff=diff; best=sh
-    return best
+        # Track best match within 3hr window
+        if diff <= 3*3600 and diff < window_diff:
+            window_diff=diff; within_window=sh
+    # Prefer a match within 3hrs; fall back to closest if none found
+    return within_window if within_window else best
 
 def _shift_sched_out_dt(cin, sh):
     """Return the expected checkout datetime for a given shift and check-in."""
@@ -325,7 +372,7 @@ def _shift_sched_out_dt(cin, sh):
             cout_dt += timedelta(days=1)
     return cout_dt
 
-def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
+def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct, emp_overrides=None):
     """
     Rules:
     - Mon-Fri : OT after reg_hours (8hrs excl. lunch)
@@ -341,6 +388,11 @@ def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
             emp_map[eid]["name"]=rec["name"]
         emp_map[eid]["punches"].append(rec["dt"])
 
+    emp_overrides = emp_overrides or {}
+
+    # Build a lookup: shift_name (lowercase) -> shift dict
+    shift_by_name = {sh["name"].lower(): sh for sh in shifts}
+
     results=[]
     for eid,emp in emp_map.items():
         all_punches=sorted(emp["punches"])
@@ -348,29 +400,104 @@ def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
         days_worked=0
         breakdown=[]
 
-        # First pass: collect all worked dates so we know which weeks have Mon-Sat attendance
-        # We'll track ISO week → set of weekday numbers (0=Mon … 5=Sat, 6=Sun)
-        week_days_worked = defaultdict(set)  # iso_week_key → set of weekday ints
+        # Group punches using shifts: check-in = first punch, check-out = last punch
+        # within the expected shift window. Next-day punches are only borrowed if they
+        # fall before the shift's scheduled end time + 2hrs, leaving the rest for their
+        # own day. This correctly handles night shifts in a 24hr punch system.
+        by_day = defaultdict(list)
+        for p in all_punches:
+            by_day[p.date()].append(p)
 
-        idx=0
-        while idx < len(all_punches):
-            cin=all_punches[idx]
-            if idx+1 >= len(all_punches):
-                idx+=1; break
-            cout=all_punches[idx+1]
-            gap=(cout-cin).total_seconds()/3600
-            if gap > 24 or gap < 0.05:
-                idx+=1; continue
-            week_key=(cin.isocalendar()[0], cin.isocalendar()[1])  # (year, week)
-            week_days_worked[week_key].add(cin.weekday())
-            idx+=2
+        used_punch_ids = set()
+        daily_pairs = []
+
+        # Resolve override shift once for this employee
+        _ov = emp_overrides.get(eid, {})
+        if isinstance(_ov, dict):
+            override_name = _ov.get("shift", "").lower()
+            override_skip_first = _ov.get("skip_first", False)
+        else:
+            override_name = str(_ov).lower()
+            override_skip_first = False
+        override_sh = shift_by_name.get(override_name) if override_name else None
+
+        for d in sorted(by_day.keys()):
+            day_punches = [p for p in sorted(by_day[d]) if id(p) not in used_punch_ids]
+            if not day_punches:
+                continue
+
+            if override_sh and override_skip_first and len(day_punches) > 1:
+                # Skip first punch (prev night's checkout), use second as check-in
+                candidate = day_punches[1]
+                # Sanity check: candidate must be within 3hrs of shift start
+                sh_start_check = datetime(d.year, d.month, d.day,
+                                          override_sh["start_h"], override_sh["start_m"], 0)
+                if abs((candidate - sh_start_check).total_seconds()) <= 3 * 3600:
+                    cin = candidate
+                else:
+                    # Candidate is too far from shift start — fall back to first punch
+                    cin = day_punches[0]
+                best_sh = override_sh
+            elif override_sh:
+                cin = day_punches[0]
+                best_sh = override_sh
+            else:
+                cin = day_punches[0]
+                # Auto-detect best shift for this specific day's check-in
+                # This handles employees who rotate between shifts across the week
+                best_sh = _match_shift(cin, shifts)
+
+            used_punch_ids.add(id(cin))
+
+            # Determine cutoff based on shift end
+            if best_sh:
+                sh_end_dt = cin.replace(
+                    hour=best_sh["end_h"], minute=best_sh["end_m"], second=0, microsecond=0)
+                if best_sh["end_h"] < best_sh["start_h"]:  # night shift crosses midnight
+                    sh_end_dt += timedelta(days=1)
+                cutoff = sh_end_dt + timedelta(hours=2)  # 2hr grace after shift end
+            else:
+                cutoff = cin + timedelta(hours=14)  # fallback: 14hr window
+
+            # All same-day punches from cin onwards
+            session_punches = [cin] + [p for p in day_punches if id(p) not in used_punch_ids and p >= cin]
+
+            # Borrow next-day punches as checkout
+            next_d = d + timedelta(days=1)
+            if next_d in by_day:
+                next_day_punches = sorted(by_day[next_d])
+                if override_sh and override_skip_first:
+                    # Night shift: checkout = first punch of next day only
+                    first_next = next(
+                        (p for p in next_day_punches if id(p) not in used_punch_ids), None)
+                    if first_next:
+                        session_punches.append(first_next)
+                        used_punch_ids.add(id(first_next))
+                else:
+                    # Normal: borrow next-day punches only within shift cutoff
+                    for p in next_day_punches:
+                        if id(p) not in used_punch_ids and p <= cutoff:
+                            session_punches.append(p)
+                            used_punch_ids.add(id(p))
+
+            session_punches = sorted(session_punches)
+            cout = session_punches[-1] if len(session_punches) > 1 else None
+            if cout:
+                used_punch_ids.add(id(cout))
+            extra = max(0, len(session_punches) - 2)
+            daily_pairs.append((cin, cout, extra))
+
+        # First pass: collect worked dates for Sunday OT rule
+        week_days_worked = defaultdict(set)
+        for cin, cout, _ in daily_pairs:
+            if cout:
+                week_key = (cin.isocalendar()[0], cin.isocalendar()[1])
+                week_days_worked[week_key].add(cin.weekday())
 
         # Second pass: full calculation
-        idx=0
-        while idx < len(all_punches):
-            cin=all_punches[idx]
+        for cin, cout, extra_punches in daily_pairs:
 
-            if idx+1 >= len(all_punches):
+            if cout is None:
                 breakdown.append({
                     "date":cin.date().strftime("%Y-%m-%d"),
                     "day":cin.date().strftime("%a"),
@@ -382,9 +509,8 @@ def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
                     "is_sunday":cin.weekday()==6,"is_saturday":cin.weekday()==5,
                     "note":"⚠ Unmatched check-in (no checkout found)",
                 })
-                idx+=1; continue
+                continue
 
-            cout=all_punches[idx+1]
             worked_raw=(cout-cin).total_seconds()/3600
 
             if worked_raw > 24:
@@ -399,15 +525,21 @@ def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
                     "is_sunday":cin.weekday()==6,"is_saturday":cin.weekday()==5,
                     "note":"⚠ Missing checkout (gap >24h)",
                 })
-                idx+=1; continue
+                continue
 
             if worked_raw < 0.05:
-                idx+=2; continue
+                continue
 
-            idx+=2
+            extra_note = f" ({extra_punches} extra punches ignored)" if extra_punches > 0 else ""
 
-            # Match shift
-            best_sh=_match_shift(cin, shifts)
+
+            # Match shift — use per-employee override if set
+            _ov2 = emp_overrides.get(eid, {})
+            _ovname2 = (_ov2.get("shift","") if isinstance(_ov2, dict) else str(_ov2)).lower()
+            if _ovname2 and _ovname2 in shift_by_name:
+                best_sh = shift_by_name[_ovname2]
+            else:
+                best_sh = _match_shift(cin, shifts)
             if best_sh:
                 sh_start=cin.replace(hour=best_sh["start_h"],minute=best_sh["start_m"],second=0,microsecond=0)
                 reg_hrs   =best_sh["reg_hours"]
@@ -447,35 +579,37 @@ def calculate_overtime(records, shifts, sun_reg_hrs, late_deduct):
                 mon_to_sat = {0,1,2,3,4,5}
                 worked_mon_sat = worked_days_this_week & mon_to_sat
                 if worked_mon_sat:
-                    # Worked any day Mon–Sat → all Sunday hours are OT
                     reg = 0.0
                     ot = worked_eff
                     notes.append("Sun: all OT (worked Mon–Sat this week)")
                 else:
-                    # No Mon–Sat work → all Sunday hours regular
                     reg = worked_eff
                     ot = 0.0
                     notes.append("Sun: all regular (no Mon–Sat work this week)")
                 sunday_ot += ot
             elif is_saturday:
-                # Saturday is a day off — all hours worked = OT
-                reg=0.0
-                ot=worked_eff
-                saturday_ot+=ot
-                notes.append("Sat (rest day): all hours OT")
+                # Saturday: OT after 6hrs (5hrs work + 1hr lunch)
+                sat_threshold = 6.0
+                reg = min(worked_eff, sat_threshold)
+                ot  = max(0.0, worked_eff - sat_threshold)
+                saturday_ot += ot
+                if ot > 0:
+                    notes.append(f"Sat: {reg:.2f}h regular + {ot:.2f}h OT")
+                else:
+                    notes.append(f"Sat: {reg:.2f}h regular (no OT)")
             else:
-                # Mon–Fri
-                reg=min(worked_eff, reg_hrs)
-                ot=max(0.0, worked_eff - reg_hrs)
-                weekday_ot+=ot
+                # Mon–Fri: OT after 9hrs
+                weekday_threshold = 9.0
+                reg = min(worked_eff, weekday_threshold)
+                ot  = max(0.0, worked_eff - weekday_threshold)
+                weekday_ot += ot
 
-            # Deduct lateness from OT
-            if late_min>0:
-                notes.append(f"Late {int(late_min)}m")
-                if late_deduct:
-                    deduct=late_min/60
-                    ot=max(0.0,ot-deduct)
-                    notes.append(f"OT −{deduct:.2f}h")
+            # Late deducted from effective hours (already reflected in worked_eff)
+            if late_min > 0:
+                late_h = int(late_min) // 60
+                late_m = int(late_min) % 60
+                late_str = f"{late_h}h {late_m}m" if late_h > 0 else f"{late_m}m"
+                notes.append(f"Late {late_str}")
 
             checkout_display=cout.strftime("%H:%M:%S")
             if cout.date()>cin.date():
@@ -607,6 +741,9 @@ class OvertimeApp(tk.Tk):
         self.configure(bg=C["bg"])
         _setup_style()
         self._records=[]; self._results=[]; self._filepath=""
+        self._dark_mode=True
+        self._emp_overrides={}  # staff_id -> shift_name
+        self._overrides=[]  # populated by _build_emp_overrides
         self._sort_col=""; self._sort_rev=True; self._tree=None
         self._vars={}; self._shifts=[]
         self._config=load_config()          # ← load saved config
@@ -622,6 +759,10 @@ class OvertimeApp(tk.Tk):
                  width=3,padx=4).pack(side=tk.LEFT,padx=14,pady=10)
         tk.Label(top,text="Overtime Calculator",font=FT,bg=C["surface"],fg=C["white"]).pack(side=tk.LEFT,pady=8)
         tk.Label(top,text="Biometric Payroll System",font=FS,bg=C["surface"],fg=C["muted"]).pack(side=tk.LEFT,padx=8,pady=18)
+        self._theme_btn=tk.Button(top,text="☀ Light",font=FS,bg=C["border"],fg=C["text"],
+            relief=tk.FLAT,bd=0,cursor="hand2",padx=10,pady=4,
+            command=self._toggle_theme)
+        self._theme_btn.pack(side=tk.RIGHT,padx=14,pady=14)
 
         main=tk.Frame(self,bg=C["bg"]); main.pack(fill=tk.BOTH,expand=True,padx=14,pady=10)
 
@@ -661,13 +802,20 @@ class OvertimeApp(tk.Tk):
         lc.bind("<Enter>",lambda e:lc.bind_all("<MouseWheel>",_on_wheel))
         lc.bind("<Leave>",lambda e:lc.unbind_all("<MouseWheel>"))
 
-        # Right panel
+        # Right panel with tabs
         right=tk.Frame(main,bg=C["bg"]); right.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+
+        nb=ttk.Notebook(right); nb.pack(fill=tk.BOTH,expand=True)
+        self._nb=nb
+        tab1=tk.Frame(nb,bg=C["bg"]); nb.add(tab1,text="  📋 Results  ")
+        tab2=tk.Frame(nb,bg=C["bg"]); nb.add(tab2,text="  📊 Charts  ")
 
         self._build_shifts(lf)
         self._build_general(lf)
         self._build_upload(lf)
-        self._build_results(right)
+        self._build_emp_overrides(lf)
+        self._build_results(tab1)
+        self._build_charts(tab2)
 
     # ── Shift rows ────────────────────────────────────────
     def _build_shifts(self,parent):
@@ -714,11 +862,15 @@ class OvertimeApp(tk.Tk):
             "sun_reg_hrs": self._vars.get("sun_reg_hrs", tk.StringVar(value="6")).get(),
             "late_deduct": bool(self._vars.get("late_deduct", tk.BooleanVar(value=True)).get()),
             "hourly_rate": self._vars.get("hourly_rate", tk.StringVar(value="200")).get(),
+            "emp_overrides": {eid: {"shift": v["shift"], "skip_first": v["skip_first"]} for eid, v in self._get_emp_overrides().items()},
         }
         if save_config(cfg):
             self._config = cfg
             self._save_lbl.configure(text="✓ Shifts saved", fg=C["green"])
             self.after(2500, lambda: self._save_lbl.configure(text=""))
+            if hasattr(self, "_override_save_lbl"):
+                self._override_save_lbl.configure(text="✓ Overrides saved", fg=C["green"])
+                self.after(2500, lambda: self._override_save_lbl.configure(text=""))
         else:
             self._save_lbl.configure(text="⚠ Save failed", fg=C["red"])
             self.after(2500, lambda: self._save_lbl.configure(text=""))
@@ -767,10 +919,10 @@ class OvertimeApp(tk.Tk):
         sep=tk.Frame(card,bg=C["border"],height=1); sep.pack(fill=tk.X,padx=2)
         e.bind("<FocusIn>", lambda ev,s=sep:s.configure(bg=C["accent"]))
         e.bind("<FocusOut>",lambda ev,s=sep:s.configure(bg=C["border"]))
-        tk.Label(card,text="Mon–Fri: OT after 8hrs (set per shift, excl. lunch)",
+        tk.Label(card,text="Mon–Fri: OT after 9hrs (excl. lunch)",
                  font=FS,bg=C["card"],fg=C["muted"],wraplength=270,justify=tk.LEFT
                  ).pack(anchor=tk.W,pady=(6,2))
-        tk.Label(card,text="Saturday: rest day — all hours worked = OT",
+        tk.Label(card,text="Saturday: OT after 6hrs (5hrs work + 1hr lunch)",
                  font=FS,bg=C["card"],fg=C["orange"],wraplength=270,justify=tk.LEFT
                  ).pack(anchor=tk.W,pady=(0,2))
         tk.Label(card,text="Sunday: OT only if any Mon–Sat work that week (otherwise regular)",
@@ -801,6 +953,93 @@ class OvertimeApp(tk.Tk):
         self._status_lbl=tk.Label(card,text="",font=FS,bg=C["card"],
                                    fg=C["green"],wraplength=275,justify=tk.LEFT)
         self._status_lbl.pack(anchor=tk.W,pady=2)
+
+    # ── Employee shift overrides ─────────────────────────
+    def _build_emp_overrides(self, parent):
+        card = self._card(parent, "👤  Employee Shift Overrides")
+        tk.Label(card, text="Assign a specific shift to an employee by Staff ID. Useful for night-shift staff whose punches look like day shifts.",
+                 font=FS, bg=C["card"], fg=C["muted"], wraplength=270, justify=tk.LEFT).pack(anchor=tk.W, pady=(0,6))
+
+        # Column headers
+        hrow = tk.Frame(card, bg=C["surface"]); hrow.pack(fill=tk.X, pady=(0,2))
+        for txt, w in [("Staff ID", 10), ("Shift Name", 10), (" ", 2)]:
+            tk.Label(hrow, text=txt, font=("Segoe UI",8,"bold"), bg=C["surface"],
+                     fg=C["muted"], width=w).pack(side=tk.LEFT, padx=3, pady=3)
+
+        self._override_container = tk.Frame(card, bg=C["card"])
+        self._override_container.pack(fill=tk.X)
+        self._overrides = []  # list of {"frame","id","shift"}
+
+        # Load saved overrides
+        for eid, val in self._config.get("emp_overrides", {}).items():
+            if isinstance(val, dict):
+                self._add_override(eid, val.get("shift",""), val.get("skip_first", False))
+            else:
+                self._add_override(eid, val, False)
+
+        bf2 = tk.Frame(card, bg=C["card"]); bf2.pack(anchor=tk.W, pady=(6,0))
+        tk.Button(bf2, text="+ Add Override", font=FS, bg=C["purple"], fg=C["white"],
+                  relief=tk.FLAT, bd=0, cursor="hand2", padx=8, pady=2,
+                  command=self._add_override).pack(side=tk.LEFT, padx=(0,6))
+        tk.Button(bf2, text="💾 Save Overrides", font=FS, bg=C["green"], fg=C["bg"],
+                  relief=tk.FLAT, bd=0, cursor="hand2", padx=8, pady=2,
+                  command=self._save_config).pack(side=tk.LEFT)
+        self._override_save_lbl = tk.Label(card, text="", font=FS, bg=C["card"], fg=C["green"])
+        self._override_save_lbl.pack(anchor=tk.W)
+
+    def _add_override(self, eid="", shift_name="", skip_first=False):
+        row = tk.Frame(self._override_container, bg=C["card"],
+                       highlightthickness=1, highlightbackground=C["border"])
+        row.pack(fill=tk.X, pady=2)
+        vid = tk.StringVar(value=eid)
+        vsh = tk.StringVar(value=shift_name)
+        vsk = tk.BooleanVar(value=skip_first)
+
+        # Staff ID entry
+        tk.Entry(row, textvariable=vid, font=FM, width=10,
+                 bg=C["surface"], fg=C["text"], insertbackground=C["accent"],
+                 relief=tk.FLAT, bd=0).pack(side=tk.LEFT, padx=2, pady=5, ipady=4)
+
+        # Shift dropdown
+        shift_names = [sv["name"].get().strip() for sv in self._shifts if sv["name"].get().strip()]
+        if not shift_names:
+            shift_names = ["(no shifts defined)"]
+        if shift_name and shift_name not in shift_names:
+            shift_names.insert(0, shift_name)
+        cb = ttk.Combobox(row, textvariable=vsh, values=shift_names, font=FM,
+                          width=14, state="readonly")
+        cb.pack(side=tk.LEFT, padx=2, pady=5)
+        if vsh.get() in shift_names:
+            cb.set(vsh.get())
+        elif shift_names:
+            cb.set(shift_names[0])
+
+        # Skip first punch checkbox
+        tk.Checkbutton(row, text="Skip 1st", variable=vsk,
+                       bg=C["card"], fg=C["yellow"], selectcolor=C["surface"],
+                       activebackground=C["card"], font=FS).pack(side=tk.LEFT, padx=4)
+
+        ov = {"frame": row, "id": vid, "shift": vsh, "skip_first": vsk}
+        self._overrides.append(ov)
+        def remove():
+            self._overrides.remove(ov)
+            row.destroy()
+            self._save_config()
+        tk.Button(row, text="✕", font=("Segoe UI",9), bg=C["card"], fg=C["red"],
+                  relief=tk.FLAT, bd=0, cursor="hand2", command=remove).pack(side=tk.LEFT, padx=3)
+
+    def _get_emp_overrides(self):
+        out = {}
+        for ov in getattr(self, "_overrides", []):
+            try:
+                eid = ov["id"].get().strip()
+                sname = ov["shift"].get().strip()
+                skip = bool(ov.get("skip_first", tk.BooleanVar()).get())
+                if eid and sname:
+                    out[eid] = {"shift": sname, "skip_first": skip}
+            except Exception:
+                pass
+        return out
 
     # ── Results panel ─────────────────────────────────────
     def _build_results(self,parent):
@@ -871,6 +1110,129 @@ class OvertimeApp(tk.Tk):
                        highlightbackground=C["border"],padx=14,pady=10)
         inner.pack(fill=tk.X); return inner
 
+    # ── Theme toggle ─────────────────────────────────────
+    def _toggle_theme(self):
+        global C
+        self._dark_mode = not self._dark_mode
+        C.update(DARK if self._dark_mode else LIGHT)
+        self._theme_btn.configure(
+            text="☀ Light" if self._dark_mode else "🌙 Dark",
+            bg=C["border"], fg=C["text"])
+        self._apply_theme(self)
+
+    def _apply_theme(self, widget):
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Frame","Labelframe"):
+                widget.configure(bg=C["bg"] if widget.master and widget.master.winfo_class()=="Tk" else C["card"])
+        except: pass
+        try:
+            if cls=="Label":
+                widget.configure(bg=widget.master.cget("bg") if widget.master else C["bg"])
+        except: pass
+        for child in widget.winfo_children():
+            self._apply_theme(child)
+        # Refresh styles
+        _setup_style()
+        if self._tree:
+            self._tree.configure(style="OT.Treeview")
+        if self._results:
+            self._populate(self._results)
+
+    # ── Charts panel ─────────────────────────────────────
+    def _build_charts(self, parent):
+        self._chart_frame = parent
+        tk.Label(parent, text="Run a calculation to see charts",
+                 font=FH, bg=C["bg"], fg=C["muted"]).pack(expand=True)
+
+    def _refresh_charts(self):
+        if not self._results: return
+        for w in self._chart_frame.winfo_children():
+            w.destroy()
+
+        cf = tk.Frame(self._chart_frame, bg=C["bg"])
+        cf.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ── Top OT earners (horizontal bars) ──────────────
+        tk.Label(cf, text="🏆 Top 10 OT Earners", font=FH,
+                 bg=C["bg"], fg=C["accent"]).pack(anchor=tk.W, pady=(0,4))
+        top10 = sorted(self._results, key=lambda r: r["total_ot"], reverse=True)[:10]
+        if top10:
+            max_ot = max(r["total_ot"] for r in top10) or 1
+            bar_frame = tk.Frame(cf, bg=C["bg"]); bar_frame.pack(fill=tk.X, pady=(0,16))
+            for i, r in enumerate(top10):
+                row = tk.Frame(bar_frame, bg=C["bg"]); row.pack(fill=tk.X, pady=2)
+                name = r["name"][:22] if len(r["name"])>22 else r["name"]
+                tk.Label(row, text=name, font=FS, bg=C["bg"], fg=C["text"],
+                         width=24, anchor=tk.W).pack(side=tk.LEFT)
+                bar_bg = tk.Frame(row, bg=C["surface"], height=18)
+                bar_bg.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                bar_bg.pack_propagate(False)
+                pct = r["total_ot"] / max_ot
+                fill_color = C["orange"] if i == 0 else C["accent"]
+                tk.Frame(bar_bg, bg=fill_color, height=18).place(
+                    relx=0, rely=0, relwidth=pct, relheight=1)
+                h = int(r["total_ot"]); m = round((r["total_ot"]-h)*60)
+                tk.Label(row, text=f"{h}h{m:02d}m", font=FS, bg=C["bg"],
+                         fg=C["yellow"], width=8).pack(side=tk.LEFT)
+
+        # ── OT by day of week (vertical bars) ─────────────
+        tk.Label(cf, text="📅 OT Hours by Day of Week", font=FH,
+                 bg=C["bg"], fg=C["accent"]).pack(anchor=tk.W, pady=(8,4))
+        day_ot = defaultdict(float)
+        for r in self._results:
+            for d in r.get("breakdown", []):
+                if not d.get("note","").startswith("⚠"):
+                    day_ot[d.get("day","")] += d.get("ot", 0)
+        days_order = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        day_vals   = [day_ot.get(d, 0) for d in days_order]
+        day_clrs   = [C["blue"]]*5 + [C["green"], C["purple"]]
+        max_day    = max(day_vals) or 1
+        BAR_MAX    = 80
+        dow_frame  = tk.Frame(cf, bg=C["bg"]); dow_frame.pack(fill=tk.X, pady=(0,16))
+        for day, val, color in zip(days_order, day_vals, day_clrs):
+            col = tk.Frame(dow_frame, bg=C["bg"])
+            col.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=3)
+            bar_h = max(int((val / max_day) * BAR_MAX), 3) if val > 0 else 2
+            tk.Frame(col, bg=C["bg"], height=BAR_MAX - bar_h).pack(fill=tk.X)
+            tk.Frame(col, bg=color, height=bar_h).pack(fill=tk.X)
+            h=int(val); m=round((val-h)*60)
+            tk.Label(col, text=f"{h}h{m:02d}m" if val>0 else "—",
+                     font=("Segoe UI",7), bg=C["bg"], fg=color).pack()
+            # Day label on contrasting card chip
+            chip = tk.Frame(col, bg=C["surface"])
+            chip.pack(fill=tk.X)
+            tk.Label(chip, text=day, font=("Segoe UI",8,"bold"),
+                     bg=C["surface"], fg=C["text"]).pack(pady=2)
+
+        # ── OT type breakdown (horizontal bars) ───────────
+        tk.Label(cf, text="📊 OT Type Breakdown", font=FH,
+                 bg=C["bg"], fg=C["accent"]).pack(anchor=tk.W, pady=(8,4))
+        wot   = sum(r["weekday_ot"]         for r in self._results)
+        satok = sum(r.get("saturday_ot", 0) for r in self._results)
+        sunot = sum(r["sunday_ot"]           for r in self._results)
+        total = wot + satok + sunot or 1
+        pie_frame = tk.Frame(cf, bg=C["bg"]); pie_frame.pack(fill=tk.X)
+        for label, val, color in [("Mon–Fri OT", wot, C["orange"]),
+                                   ("Saturday OT", satok, C["green"]),
+                                   ("Sunday OT",  sunot, C["purple"])]:
+            row = tk.Frame(pie_frame, bg=C["bg"]); row.pack(fill=tk.X, pady=3)
+            tk.Label(row, text="█", font=("Segoe UI",14), bg=C["bg"],
+                     fg=color).pack(side=tk.LEFT)
+            tk.Label(row, text=f"{label}:", font=FS, bg=C["bg"],
+                     fg=C["text"], width=14, anchor=tk.W).pack(side=tk.LEFT)
+            h=int(val); m=round((val-h)*60)
+            tk.Label(row, text=f"{h}hr {m}m", font=FS, bg=C["bg"],
+                     fg=color, width=11, anchor=tk.W).pack(side=tk.LEFT)
+            pct = val / total * 100
+            bar_bg = tk.Frame(row, bg=C["surface"], height=14)
+            bar_bg.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            bar_bg.pack_propagate(False)
+            tk.Frame(bar_bg, bg=color, height=14).place(
+                relx=0, rely=0, relwidth=pct/100, relheight=1)
+            tk.Label(row, text=f"{pct:.1f}%", font=FS, bg=C["bg"],
+                     fg=C["muted"], width=6).pack(side=tk.LEFT)
+
     # ── Logic ─────────────────────────────────────────────
     def _browse(self):
         path=filedialog.askopenfilename(title="Select Biometric File",
@@ -913,7 +1275,8 @@ class OvertimeApp(tk.Tk):
                     self.after(0, lambda: self._on_err("No valid records found.\n\nCheck file has Staff ID, Name and Date/Time columns."))
                     return
                 late_d = self._vars["late_deduct"].get()
-                res = calculate_overtime(recs, shifts, sun_reg_hrs, late_d)
+                emp_overrides = self._get_emp_overrides()
+                res = calculate_overtime(recs, shifts, sun_reg_hrs, late_d, emp_overrides)
                 self.after(0, lambda r=recs, rs=res: self._on_ok(r, rs))
             except Exception as ex:
                 msg = f"Error:\n{ex}\n\n{traceback.format_exc()}"
@@ -926,13 +1289,14 @@ class OvertimeApp(tk.Tk):
         tot_ot=sum(r["total_ot"] for r in results)
         top=results[0]["total_ot"] if results else 0
         self._sv["emp"].set(str(len(results)))
-        self._sv["ot"].set(f"{tot_ot:.1f} hrs")
+        self._sv["ot"].set(_fmt_hm(tot_ot) + " hrs")
         self._sv["pay"].set("— set rate →")
-        self._sv["top"].set(f"{top:.1f} hrs")
+        self._sv["top"].set(_fmt_hm(top) + " hrs")
         self._populate(results)
         self._status_lbl.configure(text=f"✓ {len(recs)} records → {len(results)} employees",fg=C["green"])
         self._calc_btn.configure(state=tk.NORMAL,text="⚡  CALCULATE OVERTIME")
         self._export_btn.configure(state=tk.NORMAL)
+        self._refresh_charts()
 
     def _on_err(self,msg):
         self._status_lbl.configure(text="⚠ Error",fg=C["red"])
@@ -970,13 +1334,13 @@ class OvertimeApp(tk.Tk):
             elif r["total_ot"]>10: tag="mid"
             elif r["total_ot"]>0: tag="low"
             tags=(tag,)+(("alt",) if i%2 else ())
-            late=f"{int(r.get('total_late_min',0))}m" if r.get("total_late_min",0)>0 else "—"
+            late=(lambda m: f"{int(m)//60}h {int(m)%60}m" if m>=60 else f"{int(m)}m")(r.get('total_late_min',0)) if r.get("total_late_min",0)>0 else "—"
             pay=f"KES {r['ot_pay']:,.2f}" if r["ot_pay"]>0 else "—"
             self._tree.insert("",tk.END,iid=f"emp_{r['id']}",tags=tags,values=(
                 r["id"],r["name"],r["days_worked"],
-                f"{r['regular_hours']:.2f}",f"{r['weekday_ot']:.2f}",
-                f"{r.get('saturday_ot',0):.2f}",f"{r['sunday_ot']:.2f}",
-                f"{r['total_ot']:.2f}",late,pay))
+                f"{r['regular_hours']:.2f}",_fmt_hm(r['weekday_ot']),
+                _fmt_hm(r.get('saturday_ot',0)),_fmt_hm(r['sunday_ot']),
+                _fmt_hm(r['total_ot']),late,pay))
 
     def _filter(self):
         if not self._tree or not self._results: return
@@ -1044,11 +1408,11 @@ class OvertimeApp(tk.Tk):
         summary_items=[
             ("Days",        str(emp["days_worked"]),                    C["text"]),
             ("Reg Hrs",     f"{emp['regular_hours']:.2f}",              C["text"]),
-            ("Mon–Fri OT",  f"{emp['weekday_ot']:.2f}h",               C["orange"]),
-            ("Sat OT",      f"{emp.get('saturday_ot',0):.2f}h",        C["blue"]),
-            ("Sun OT",      f"{emp['sunday_ot']:.2f}h",                C["purple"]),
-            ("Total OT",    f"{emp['total_ot']:.2f}h",                 C["accent"]),
-            ("Total Late",  f"{int(emp.get('total_late_min',0))}m",    C["red"]),
+            ("Mon–Fri OT",  _fmt_hm(emp['weekday_ot']),               C["orange"]),
+            ("Sat OT",      _fmt_hm(emp.get('saturday_ot',0)),        C["blue"]),
+            ("Sun OT",      _fmt_hm(emp['sunday_ot']),                C["purple"]),
+            ("Total OT",    _fmt_hm(emp['total_ot']),                 C["accent"]),
+            ("Total Late",  (lambda m: f"{int(m)//60}h {int(m)%60}m" if m>=60 else f"{int(m)}m")(emp.get('total_late_min',0)),    C["red"]),
             ("OT Pay",      f"KES {emp['ot_pay']:,.2f}" if emp["ot_pay"]>0 else "—", C["yellow"]),
         ]
         for lbl,val,color in summary_items:
@@ -1112,10 +1476,10 @@ class OvertimeApp(tk.Tk):
                 d.get("sched_out","—"),
                 cin_disp,
                 cout_disp,
-                f"{d['worked']:.2f}" if d["worked"]>0 else "—",
+                _fmt_hm(d['worked']) if d["worked"]>0 else "—",
                 f"{int(d.get('early_min',0))}m" if d.get("early_min",0)>0 else "—",
-                f"{int(d.get('late_min',0))}m"  if d.get("late_min",0)>0  else "—",
-                f"{d['ot']:.2f}" if d.get("ot",0)>0 else "—",
+                (lambda m: f"{int(m)//60}h {int(m)%60}m" if m>=60 else f"{int(m)}m")(d.get('late_min',0)) if d.get("late_min",0)>0 else "—",
+                _fmt_hm(d['ot']) if d.get("ot",0)>0 else "—",
                 d.get("note",""),
             ))
 
