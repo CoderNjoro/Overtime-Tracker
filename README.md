@@ -59,7 +59,7 @@ Your biometric file should have columns similar to:
 
 | Employee Staff ID | Full Name           | Date                | Record Type  |
 |-------------------|---------------------|---------------------|--------------|
-| 13333134          | JOYCE WAMBUI NJOROGE| 2026/02/23 07:41:56 | Check In/Out |
+| 43784929363        | Josephat Wilston  | 2026/02/23 07:41:56 | Check In/Out |
 
 Column names are flexible — the parser looks for keywords like
 "staff", "employee", "name", "date", "time".
